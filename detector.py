@@ -31,7 +31,8 @@ class Detector:
 
     def __init__(self, R: float = 2 * m, N: int = 40,
                  r: float = 10 * cm, a: float = 0.5,
-                 attenuation_length: float = np.inf, rng=None):
+                 attenuation_length: float = np.inf, rng=None,
+                 search: str = 'brute'):
         self.R = R
         self.N = N
         self.r = r
@@ -42,8 +43,115 @@ class Detector:
         # массив (N, 3): строка k -- координаты центра k-го ФЭУ
         self.pmt_directions = fibonacci_sphere(N)
         self.pmt_positions = R * self.pmt_directions
+        # алгоритм поиска ФЭУ: 'brute' -- перебор всех ФЭУ,
+        # 'grid' -- сетка по (cos theta, phi), 'kdtree' -- дерево scipy
+        self.search = search
+        self._grid = None
+        self._tree = None
 
     def pmt_index(self, points: np.ndarray) -> np.ndarray:
+        """Номер ФЭУ, которому принадлежит точка на поверхности, или -1.
+
+        Выбор алгоритма -- атрибут `search`; результат у всех одинаковый.
+        """
+        points = np.atleast_2d(points)
+        if self.search == 'grid':
+            return self.pmt_index_grid(points)
+        if self.search == 'kdtree':
+            return self.pmt_index_kdtree(points)
+        return self.pmt_index_brute(points)
+
+    def _on_cap(self, points: np.ndarray, k: np.ndarray) -> np.ndarray:
+        """Лежит ли точка points[i] на катоде k[i] (k = -1 -- нет)."""
+        n = self.pmt_directions[np.maximum(k, 0)]
+        cos = np.sum(points * n, axis=-1)
+        rho2 = np.sum(points**2, axis=-1) - cos**2
+        return (k >= 0) & (cos > 0) & (rho2 <= self.r**2)
+
+    def build_grid(self, n_cos: int = None, n_phi: int = None):
+        """Сетка ячеек по (cos theta, phi) со списками ФЭУ-кандидатов.
+
+        Ячейки равны по площади (равный шаг по cos theta). Для каждой ячейки
+        запоминаются ФЭУ, чей катод может её задевать: угловое расстояние от
+        центра ячейки до оси ФЭУ не больше alpha + половины углового
+        размера ячейки. Списки дополняются -1 до одинаковой длины K, так что
+        кандидаты хранятся в массиве (n_cells, K) и выбираются индексацией.
+        """
+        if n_cos is None:
+            # порядка одного ФЭУ на ячейку
+            n_cos = max(4, int(np.sqrt(self.N / 2)))
+        if n_phi is None:
+            n_phi = 2 * n_cos
+        cos_edges = np.linspace(-1, 1, n_cos + 1)
+        phi_edges = np.linspace(-np.pi, np.pi, n_phi + 1)
+
+        # углы, ограничивающие ячейку: точки по контуру ячейки
+        s = np.linspace(0, 1, 5)
+        c_lo, c_hi = cos_edges[:-1, None], cos_edges[1:, None]
+        p_lo, p_hi = phi_edges[:-1, None], phi_edges[1:, None]
+        cos_c = 0.5 * (c_lo + c_hi)[:, 0]
+        phi_c = 0.5 * (p_lo + p_hi)[:, 0]
+
+        def unit(cos, phi):
+            cos, phi = np.broadcast_arrays(cos, phi)
+            sin = np.sqrt(np.clip(1 - cos**2, 0, None))
+            return np.stack([sin * np.cos(phi), sin * np.sin(phi), cos], axis=-1)
+
+        CC, PC = np.meshgrid(cos_c, phi_c, indexing='ij')
+        centers = unit(CC, PC)                                   # (n_cos, n_phi, 3)
+        # контур ячейки: стороны cos = const и phi = const
+        cos_b = np.concatenate([np.broadcast_to(c_lo, (n_cos, 5)),
+                                np.broadcast_to(c_hi, (n_cos, 5)),
+                                c_lo + s * (c_hi - c_lo),
+                                c_lo + s * (c_hi - c_lo)], axis=1)  # (n_cos, 20)
+        phi_s = np.concatenate([p_lo + s * (p_hi - p_lo),
+                                p_lo + s * (p_hi - p_lo),
+                                np.broadcast_to(p_lo, (n_phi, 5)),
+                                np.broadcast_to(p_hi, (n_phi, 5))], axis=1)  # (n_phi, 20)
+        border = unit(cos_b[:, None, :], phi_s[None, :, :])     # (n_cos, n_phi, 20, 3)
+        cos_half = np.min(np.sum(border * centers[:, :, None], axis=-1), axis=-1)
+        half = np.arccos(np.clip(cos_half, -1, 1))               # полуразмер ячейки
+
+        alpha = np.arcsin(self.r / self.R)
+        ang = np.arccos(np.clip(centers.reshape(-1, 3) @ self.pmt_directions.T, -1, 1))
+        cand = ang <= (alpha + half.reshape(-1, 1)) * 1.01      # (n_cells, N)
+        K = max(1, cand.sum(axis=1).max())
+        table = np.full((cand.shape[0], K), -1)
+        cells, pmts = np.nonzero(cand)
+        pos = np.arange(len(cells)) - np.searchsorted(cells, cells)  # номер в строке
+        table[cells, pos] = pmts
+        self._grid = dict(n_cos=n_cos, n_phi=n_phi, table=table)
+        return self._grid
+
+    def pmt_index_grid(self, points: np.ndarray) -> np.ndarray:
+        """Поиск через сетку: проверяются только K кандидатов ячейки, а не все N."""
+        if self._grid is None:
+            self.build_grid()
+        g = self._grid
+        rho = np.linalg.norm(points, axis=1)
+        cos = points[:, 2] / rho
+        phi = np.arctan2(points[:, 1], points[:, 0])
+        i = np.clip(((cos + 1) / 2 * g['n_cos']).astype(int), 0, g['n_cos'] - 1)
+        j = np.clip(((phi + np.pi) / (2 * np.pi) * g['n_phi']).astype(int), 0, g['n_phi'] - 1)
+        cand = g['table'][i * g['n_phi'] + j]                   # (M, K)
+        hit = self._on_cap(points[:, None, :], cand)            # (M, K)
+        return np.where(hit.any(axis=1), cand[np.arange(len(points)), hit.argmax(axis=1)], -1)
+
+    def pmt_index_kdtree(self, points: np.ndarray) -> np.ndarray:
+        """Поиск через k-d дерево: ближайший ФЭУ за O(log N), затем проверка катода.
+
+        Катоды не перекрываются, поэтому если точка лежит на катоде, то центр
+        этого ФЭУ -- ближайший к ней (угловое расстояние < alpha, а до любого
+        другого ФЭУ > alpha).
+        """
+        if self._tree is None:
+            from scipy.spatial import cKDTree
+            self._tree = cKDTree(self.pmt_directions)
+        rho = np.linalg.norm(points, axis=1, keepdims=True)
+        _, k = self._tree.query(points / rho)
+        return np.where(self._on_cap(points, k), k, -1)
+
+    def pmt_index_brute(self, points: np.ndarray) -> np.ndarray:
         """Номер ФЭУ, которому принадлежит точка на поверхности, или -1.
 
         points: массив (3,) или (M, 3) точек на сфере радиуса R.

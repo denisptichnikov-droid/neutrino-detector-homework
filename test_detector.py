@@ -101,3 +101,21 @@ def test_attenuation_from_center():
     hit_att = (d.trace(np.zeros(3), n) >= 0).mean()
     hit_free = (det.trace(np.zeros(3), n) >= 0).mean()
     assert abs(hit_att / hit_free - np.exp(-d.R / 8.0)) < 0.01
+
+
+def test_fast_search_matches_brute():
+    rng = np.random.default_rng(12)
+    for R, N, M in ((2.0, 40, 500_000), (15.0, 2000, 50_000)):
+        d = Detector(R=R, N=N, r=0.1)
+        pts = R * fibonacci_sphere(M)[rng.permutation(M)]
+        # добавим точки вблизи краёв катодов -- самый трудный случай
+        k = rng.integers(0, N, M // 2)
+        nk = d.pmt_directions[k]
+        t = np.cross(nk, rng.normal(size=(len(k), 3)))
+        t /= np.linalg.norm(t, axis=1, keepdims=True)
+        alpha = np.arcsin(d.r / R) * rng.uniform(0.98, 1.02, (len(k), 1))
+        edge = R * (np.cos(alpha) * nk + np.sin(alpha) * t)
+        pts = np.concatenate([pts, edge, d.pmt_positions])
+        ref = d.pmt_index_brute(pts)
+        assert np.array_equal(d.pmt_index_grid(pts), ref)
+        assert np.array_equal(d.pmt_index_kdtree(pts), ref)
