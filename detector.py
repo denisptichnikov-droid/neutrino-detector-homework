@@ -68,59 +68,69 @@ class Detector:
         rho2 = np.sum(points**2, axis=-1) - cos**2
         return (k >= 0) & (cos > 0) & (rho2 <= self.r**2)
 
-    def build_grid(self, n_cos: int = None, n_phi: int = None):
-        """Сетка ячеек по (cos theta, phi) со списками ФЭУ-кандидатов.
+    def build_grid(self, n_theta: int = None):
+        """Сетка ячеек по (theta, phi) со списками ФЭУ-кандидатов.
 
-        Ячейки равны по площади (равный шаг по cos theta). Для каждой ячейки
-        запоминаются ФЭУ, чей катод может её задевать: угловое расстояние от
-        центра ячейки до оси ФЭУ не больше alpha + половины углового
-        размера ячейки. Списки дополняются -1 до одинаковой длины K, так что
-        кандидаты хранятся в массиве (n_cells, K) и выбираются индексацией.
+        Пояса по theta имеют одинаковую угловую ширину dtheta, а число ячеек
+        по phi в поясе пропорционально sin(theta): тогда все ячейки почти
+        квадратные, размером ~dtheta x dtheta, в том числе у полюсов (там
+        пояс -- одна-две ячейки-«шапки», а не узкие клинья).
+        Ячейки нумеруются подряд: ячейка (i, j) имеет номер offset[i] + j.
+
+        Для каждой ячейки запоминаются ФЭУ, чей катод может её задевать:
+        угловое расстояние от центра ячейки до оси ФЭУ не больше alpha +
+        половины углового размера ячейки. Списки дополняются -1 до
+        одинаковой длины K и хранятся в массиве (n_cells, K).
         """
-        if n_cos is None:
-            # порядка одного ФЭУ на ячейку
-            n_cos = max(4, int(np.sqrt(self.N / 2)))
-        if n_phi is None:
-            n_phi = 2 * n_cos
-        cos_edges = np.linspace(-1, 1, n_cos + 1)
-        phi_edges = np.linspace(-np.pi, np.pi, n_phi + 1)
+        if n_theta is None:
+            # ячейка вдвое меньше расстояния между соседними ФЭУ ~ sqrt(4 pi / N):
+            # тогда в ячейку почти всегда попадает не больше одного катода (K ~ 1)
+            n_theta = max(4, 2 * int(round(np.pi / np.sqrt(4 * np.pi / self.N))))
+        dtheta = np.pi / n_theta
+        th_lo = np.arange(n_theta) * dtheta
+        th_hi = th_lo + dtheta
+        sin_max = np.sin(np.clip(np.pi / 2, th_lo, th_hi))    # самая длинная параллель пояса
+        n_phi = np.maximum(1, np.round(2 * np.pi * sin_max / dtheta)).astype(int)
+        offset = np.concatenate([[0], np.cumsum(n_phi)])
 
-        # углы, ограничивающие ячейку: точки по контуру ячейки
+        # границы всех ячеек одним плоским массивом длины n_cells
+        row = np.repeat(np.arange(n_theta), n_phi)
+        j = np.arange(offset[-1]) - offset[row]
+        dphi = 2 * np.pi / n_phi[row]
+        t_lo, t_hi = th_lo[row, None], th_hi[row, None]
+        p_lo = (-np.pi + j * dphi)[:, None]
+        p_hi = p_lo + dphi[:, None]
+
+        def unit(theta, phi):
+            theta, phi = np.broadcast_arrays(theta, phi)
+            return np.stack([np.sin(theta) * np.cos(phi),
+                             np.sin(theta) * np.sin(phi),
+                             np.cos(theta)], axis=-1)
+
+        centers = unit(0.5 * (t_lo + t_hi), 0.5 * (p_lo + p_hi))[:, 0]   # (n_cells, 3)
+        # контур ячейки: стороны theta = const и phi = const, по 5 точек
         s = np.linspace(0, 1, 5)
-        c_lo, c_hi = cos_edges[:-1, None], cos_edges[1:, None]
-        p_lo, p_hi = phi_edges[:-1, None], phi_edges[1:, None]
-        cos_c = 0.5 * (c_lo + c_hi)[:, 0]
-        phi_c = 0.5 * (p_lo + p_hi)[:, 0]
-
-        def unit(cos, phi):
-            cos, phi = np.broadcast_arrays(cos, phi)
-            sin = np.sqrt(np.clip(1 - cos**2, 0, None))
-            return np.stack([sin * np.cos(phi), sin * np.sin(phi), cos], axis=-1)
-
-        CC, PC = np.meshgrid(cos_c, phi_c, indexing='ij')
-        centers = unit(CC, PC)                                   # (n_cos, n_phi, 3)
-        # контур ячейки: стороны cos = const и phi = const
-        cos_b = np.concatenate([np.broadcast_to(c_lo, (n_cos, 5)),
-                                np.broadcast_to(c_hi, (n_cos, 5)),
-                                c_lo + s * (c_hi - c_lo),
-                                c_lo + s * (c_hi - c_lo)], axis=1)  # (n_cos, 20)
-        phi_s = np.concatenate([p_lo + s * (p_hi - p_lo),
-                                p_lo + s * (p_hi - p_lo),
-                                np.broadcast_to(p_lo, (n_phi, 5)),
-                                np.broadcast_to(p_hi, (n_phi, 5))], axis=1)  # (n_phi, 20)
-        border = unit(cos_b[:, None, :], phi_s[None, :, :])     # (n_cos, n_phi, 20, 3)
-        cos_half = np.min(np.sum(border * centers[:, :, None], axis=-1), axis=-1)
-        half = np.arccos(np.clip(cos_half, -1, 1))               # полуразмер ячейки
+        th_b = np.concatenate([np.broadcast_to(t_lo, (len(row), 5)),
+                               np.broadcast_to(t_hi, (len(row), 5)),
+                               t_lo + s * (t_hi - t_lo),
+                               t_lo + s * (t_hi - t_lo)], axis=1)       # (n_cells, 20)
+        ph_b = np.concatenate([p_lo + s * (p_hi - p_lo),
+                               p_lo + s * (p_hi - p_lo),
+                               np.broadcast_to(p_lo, (len(row), 5)),
+                               np.broadcast_to(p_hi, (len(row), 5))], axis=1)
+        border = unit(th_b, ph_b)                                         # (n_cells, 20, 3)
+        cos_half = np.min(np.sum(border * centers[:, None], axis=-1), axis=-1)
+        half = np.arccos(np.clip(cos_half, -1, 1))                        # полуразмер ячейки
 
         alpha = np.arcsin(self.r / self.R)
-        ang = np.arccos(np.clip(centers.reshape(-1, 3) @ self.pmt_directions.T, -1, 1))
-        cand = ang <= (alpha + half.reshape(-1, 1)) * 1.01      # (n_cells, N)
+        ang = np.arccos(np.clip(centers @ self.pmt_directions.T, -1, 1))
+        cand = ang <= (alpha + half[:, None]) * 1.01                      # (n_cells, N)
         K = max(1, cand.sum(axis=1).max())
         table = np.full((cand.shape[0], K), -1)
         cells, pmts = np.nonzero(cand)
-        pos = np.arange(len(cells)) - np.searchsorted(cells, cells)  # номер в строке
+        pos = np.arange(len(cells)) - np.searchsorted(cells, cells)       # номер в строке
         table[cells, pos] = pmts
-        self._grid = dict(n_cos=n_cos, n_phi=n_phi, table=table)
+        self._grid = dict(n_theta=n_theta, n_phi=n_phi, offset=offset, table=table)
         return self._grid
 
     def pmt_index_grid(self, points: np.ndarray) -> np.ndarray:
@@ -129,11 +139,12 @@ class Detector:
             self.build_grid()
         g = self._grid
         rho = np.linalg.norm(points, axis=1)
-        cos = points[:, 2] / rho
+        theta = np.arccos(np.clip(points[:, 2] / rho, -1, 1))
         phi = np.arctan2(points[:, 1], points[:, 0])
-        i = np.clip(((cos + 1) / 2 * g['n_cos']).astype(int), 0, g['n_cos'] - 1)
-        j = np.clip(((phi + np.pi) / (2 * np.pi) * g['n_phi']).astype(int), 0, g['n_phi'] - 1)
-        cand = g['table'][i * g['n_phi'] + j]                   # (M, K)
+        i = np.clip((theta / np.pi * g['n_theta']).astype(int), 0, g['n_theta'] - 1)
+        n_phi = g['n_phi'][i]
+        j = np.clip(((phi + np.pi) / (2 * np.pi) * n_phi).astype(int), 0, n_phi - 1)
+        cand = g['table'][g['offset'][i] + j]                             # (M, K)
         hit = self._on_cap(points[:, None, :], cand)            # (M, K)
         return np.where(hit.any(axis=1), cand[np.arange(len(points)), hit.argmax(axis=1)], -1)
 
