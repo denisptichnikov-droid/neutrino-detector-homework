@@ -24,16 +24,18 @@ def fibonacci_sphere(N: int) -> vector3:
 class Detector:
     """Сфера радиуса R, на поверхности которой стоят N ФЭУ.
 
-    Фотокатод ФЭУ -- плоский диск радиуса r, касающийся сферы в точке
-    `pmt_positions[k]`, с нормалью `pmt_directions[k]` (наружу).
+    Фотокатод ФЭУ -- плоский диск радиуса r, вписанный в сферу (край на
+    поверхности), с осью `pmt_directions[k]`; `pmt_positions[k]` -- точка
+    сферы на этой оси.
     """
 
     def __init__(self, R: float = 2 * m, N: int = 40,
-                 r: float = 10 * cm, a: float = 0.5):
+                 r: float = 10 * cm, a: float = 0.5, rng=None):
         self.R = R
         self.N = N
         self.r = r
         self.a = a
+        self.rng = np.random.default_rng(rng)
         # массив (N, 3): строка k -- координаты центра k-го ФЭУ
         self.pmt_directions = fibonacci_sphere(N)
         self.pmt_positions = R * self.pmt_directions
@@ -56,6 +58,50 @@ class Detector:
         # в строке не больше одного True; argmax берёт его номер
         index = np.where(hit.any(axis=1), hit.argmax(axis=1), -1)
         return index
+
+    def intersect_surface(self, origins: np.ndarray,
+                          directions: np.ndarray) -> np.ndarray:
+        """Точки, в которых лучи из `origins` вдоль `directions` выходят на сферу.
+
+        origins: (3,) или (M, 3) -- точки внутри детектора;
+        directions: (M, 3) -- единичные векторы.
+        Решаем |o + t n|^2 = R^2:  t^2 + 2 (o·n) t + |o|^2 - R^2 = 0.
+        Изнутри сферы |o| < R, свободный член < 0, поэтому корни разных
+        знаков и нужный (вперёд по лучу) -- положительный.
+        """
+        origins = np.broadcast_to(origins, directions.shape)
+        b = np.sum(origins * directions, axis=1)
+        c = np.sum(origins**2, axis=1) - self.R**2
+        t = -b + np.sqrt(b**2 - c)
+        return origins + t[:, None] * directions
+
+    def trace(self, origins: np.ndarray, directions: np.ndarray) -> np.ndarray:
+        """Номер ФЭУ, в который попадает каждый фотон, или -1.
+
+        Без рассеяния и поглощения фотон летит по прямой до стенки, где
+        поглощается. Катод -- плоский диск радиуса r, вписанный в сферу
+        (его край лежит на поверхности). Диск и сферический сегмент за ним
+        ограничивают замкнутый объём, поэтому луч из детектора пересекает
+        диск тогда и только тогда, когда выходит на сферу внутри этого
+        сегмента -- это ровно условие `pmt_index`.
+        """
+        return self.pmt_index(self.intersect_surface(origins, directions))
+
+    def photoelectrons(self, n_photons: np.ndarray) -> np.ndarray:
+        """Случайное число фотоэлектронов для каждого ФЭУ.
+
+        n_photons: массив (N,) -- число фотонов, попавших на каждый катод.
+        Каждый фотон даёт Poisson(a) фотоэлектронов; сумма независимых
+        пуассоновских величин -- снова Пуассон, со средним a * n_photons.
+        """
+        return self.rng.poisson(self.a * np.asarray(n_photons))
+
+    def response(self, origins: np.ndarray,
+                 directions: np.ndarray) -> np.ndarray:
+        """Число фотоэлектронов в каждом из N каналов для набора фотонов."""
+        idx = self.trace(origins, directions)
+        n_photons = np.bincount(idx[idx >= 0], minlength=self.N)
+        return self.photoelectrons(n_photons)
 
     def is_on_pmt(self, points: np.ndarray) -> np.ndarray:
         """True, если точка принадлежит какому-либо ФЭУ."""

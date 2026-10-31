@@ -42,3 +42,44 @@ def test_coverage_monte_carlo():
     points = random_on_sphere(M, det.R)
     frac = det.is_on_pmt(points).mean()
     assert abs(frac - det.coverage()) < 5 * np.sqrt(frac / M)
+
+
+def test_intersection_on_sphere():
+    rng = np.random.default_rng(0)
+    o = rng.uniform(-1, 1, (1000, 3))
+    n = fibonacci_sphere(1000)
+    p = det.intersect_surface(o, n)
+    assert np.allclose(np.linalg.norm(p, axis=1), det.R)
+    # точка лежит впереди по лучу
+    assert np.all(np.sum((p - o) * n, axis=1) > 0)
+
+
+def test_trace_towards_pmt():
+    # из любой точки внутри луч точно на центр ФЭУ попадает в него
+    o = np.array([0.3, -0.5, 0.7])
+    n = det.pmt_positions - o
+    n /= np.linalg.norm(n, axis=1, keepdims=True)
+    assert np.array_equal(det.trace(o, n), np.arange(det.N))
+
+
+def test_trace_matches_disk_crossing():
+    # прямая проверка: пересечение луча с плоскостью вписанного диска
+    rng = np.random.default_rng(1)
+    o = rng.uniform(-1, 1, 3)
+    n = fibonacci_sphere(400_000)
+    idx = det.trace(o, n)
+    k = 0
+    nk = det.pmt_directions[k]
+    h = np.sqrt(det.R**2 - det.r**2)           # расстояние до плоскости диска
+    t = (h - o @ nk) / (n @ nk)
+    q = o + t[:, None] * n
+    ok = (t > 0) & (np.linalg.norm(q - h * nk, axis=1) <= det.r)
+    assert np.array_equal(ok, idx == k)
+
+
+def test_photoelectrons_poisson():
+    d = Detector(rng=3)
+    pe = d.photoelectrons(np.full(200_000, 4))
+    assert abs(pe.mean() - 4 * d.a) < 0.01
+    assert abs(pe.var() - 4 * d.a) < 0.02
+    assert np.all(d.photoelectrons(np.zeros(10, int)) == 0)
