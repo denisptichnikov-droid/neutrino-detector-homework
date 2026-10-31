@@ -30,11 +30,14 @@ class Detector:
     """
 
     def __init__(self, R: float = 2 * m, N: int = 40,
-                 r: float = 10 * cm, a: float = 0.5, rng=None):
+                 r: float = 10 * cm, a: float = 0.5,
+                 attenuation_length: float = np.inf, rng=None):
         self.R = R
         self.N = N
         self.r = r
         self.a = a
+        # длина затухания света в сцинтилляторе; inf -- без затухания
+        self.attenuation_length = attenuation_length
         self.rng = np.random.default_rng(rng)
         # массив (N, 3): строка k -- координаты центра k-го ФЭУ
         self.pmt_directions = fibonacci_sphere(N)
@@ -70,22 +73,44 @@ class Detector:
         знаков и нужный (вперёд по лучу) -- положительный.
         """
         origins = np.broadcast_to(origins, directions.shape)
+        t = self.path_length(origins, directions)
+        return origins + t[:, None] * directions
+
+    def path_length(self, origins: np.ndarray,
+                    directions: np.ndarray) -> np.ndarray:
+        """Расстояние от `origins` до стенки вдоль `directions`, массив (M,)."""
+        origins = np.broadcast_to(origins, directions.shape)
         b = np.sum(origins * directions, axis=1)
         c = np.sum(origins**2, axis=1) - self.R**2
-        t = -b + np.sqrt(b**2 - c)
-        return origins + t[:, None] * directions
+        return -b + np.sqrt(b**2 - c)
+
+    def survives(self, path: np.ndarray) -> np.ndarray:
+        """Розыгрыш затухания: True, если фотон прошёл путь `path` без поглощения.
+
+        Вероятность пройти путь l: exp(-l / L), L -- длина затухания.
+        """
+        if np.isinf(self.attenuation_length):
+            return np.ones(len(path), dtype=bool)
+        p = np.exp(-path / self.attenuation_length)
+        return self.rng.uniform(size=len(path)) < p
 
     def trace(self, origins: np.ndarray, directions: np.ndarray) -> np.ndarray:
         """Номер ФЭУ, в который попадает каждый фотон, или -1.
 
-        Без рассеяния и поглощения фотон летит по прямой до стенки, где
-        поглощается. Катод -- плоский диск радиуса r, вписанный в сферу
-        (его край лежит на поверхности). Диск и сферический сегмент за ним
-        ограничивают замкнутый объём, поэтому луч из детектора пересекает
-        диск тогда и только тогда, когда выходит на сферу внутри этого
-        сегмента -- это ровно условие `pmt_index`.
+        Без рассеяния фотон летит по прямой до стенки, где поглощается;
+        по пути он может быть поглощён в сцинтилляторе (см. `survives`).
+        Катод -- плоский диск радиуса r, вписанный в сферу (его край лежит
+        на поверхности). Диск и сферический сегмент за ним ограничивают
+        замкнутый объём, поэтому луч из детектора пересекает диск тогда и
+        только тогда, когда выходит на сферу внутри этого сегмента -- это
+        ровно условие `pmt_index`. Путь до катода считаем равным пути до
+        сферы: разница не больше R - sqrt(R^2 - r^2) ≈ 2.5 мм << L.
         """
-        return self.pmt_index(self.intersect_surface(origins, directions))
+        origins = np.broadcast_to(origins, directions.shape)
+        t = self.path_length(origins, directions)
+        index = self.pmt_index(origins + t[:, None] * directions)
+        index[~self.survives(t)] = -1
+        return index
 
     def photoelectrons(self, n_photons: np.ndarray) -> np.ndarray:
         """Случайное число фотоэлектронов для каждого ФЭУ.

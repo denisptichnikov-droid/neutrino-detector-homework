@@ -24,4 +24,5 @@ def expected_fraction(det: Detector, origin=(0, 0, 0)) -> np.ndarray:
     v = centers - origin
     d = np.linalg.norm(v, axis=1)
     cos_psi = np.sum(v * det.pmt_directions, axis=1) / d
-    return det.r**2 * cos_psi / (4 * d**2)
+    # затухание по пути до катода (inf -> множитель 1)
+    return det.r**2 * cos_psi / (4 * d**2) * np.exp(-d / det.attenuation_length)

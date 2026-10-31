@@ -15,3 +15,16 @@ def test_expected_fraction_matches_tracing():
         idx = det.trace(np.array(origin, float), n)
         mc = (idx >= 0).mean()
         assert abs(mc - expected_fraction(det, origin).sum()) < 5 * np.sqrt(mc / M)
+
+
+def test_expected_fraction_with_attenuation():
+    det = Detector(attenuation_length=8.0, rng=11)
+    rng = np.random.default_rng(1)
+    M = 2_000_000
+    phi = rng.uniform(0, 2 * np.pi, M)
+    ct = rng.uniform(-1, 1, M)
+    st = np.sqrt(1 - ct**2)
+    n = np.stack([st * np.cos(phi), st * np.sin(phi), ct], axis=1)
+    origin = (0, 0, -1.5)
+    mc = (det.trace(np.array(origin, float), n) >= 0).mean()
+    assert abs(mc - expected_fraction(det, origin).sum()) < 5 * np.sqrt(mc / M)

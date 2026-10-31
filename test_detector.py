@@ -83,3 +83,21 @@ def test_photoelectrons_poisson():
     assert abs(pe.mean() - 4 * d.a) < 0.01
     assert abs(pe.var() - 4 * d.a) < 0.02
     assert np.all(d.photoelectrons(np.zeros(10, int)) == 0)
+
+
+def test_survival_probability():
+    d = Detector(attenuation_length=8.0, rng=7)
+    for l in (0.5, 2.0, 4.0):
+        frac = d.survives(np.full(500_000, l)).mean()
+        assert abs(frac - np.exp(-l / 8.0)) < 0.003
+    # без затухания выживают все
+    assert det.survives(np.full(100, 3.0)).all()
+
+
+def test_attenuation_from_center():
+    # из центра путь до любого катода равен R
+    d = Detector(attenuation_length=8.0, rng=8)
+    n = fibonacci_sphere(2_000_000)
+    hit_att = (d.trace(np.zeros(3), n) >= 0).mean()
+    hit_free = (det.trace(np.zeros(3), n) >= 0).mean()
+    assert abs(hit_att / hit_free - np.exp(-d.R / 8.0)) < 0.01
