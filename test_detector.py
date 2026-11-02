@@ -103,6 +103,16 @@ def test_attenuation_from_center():
     assert abs(hit_att / hit_free - np.exp(-d.R / 8.0)) < 0.01
 
 
+def test_pure_python_matches_numpy():
+    # эталон из задачи 7 и векторная версия на одних и тех же лучах
+    from pure_python import PyDetector
+    py = PyDetector()
+    o = (0.0, 0.0, 0.5)
+    n = fibonacci_sphere(5000)
+    idx = np.array([py.trace(o, tuple(v)) for v in n])
+    assert np.array_equal(idx, det.trace(np.array(o), n))
+
+
 def test_fast_search_matches_brute():
     rng = np.random.default_rng(12)
     for R, N, M in ((2.0, 40, 500_000), (15.0, 2000, 50_000)):

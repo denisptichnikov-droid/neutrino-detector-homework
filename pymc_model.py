@@ -3,7 +3,7 @@
 Геометрия (координаты ФЭУ) берётся из `Detector` -- в графе она константа.
 Всё, что разыгрывается при событии, -- узлы графа:
 
-    n_gamma ~ Poisson(Y E)                       число фотонов (задача 2)
+    n_gamma = Y E или ~ Poisson(Y E)             число фотонов (задачи 2, 5)
     phi, cosTheta ~ Uniform                      направления фотонов (задача 2)
     t = путь до стенки, p = o + t n              пропагация (задача 3)
     on_k = точка p на катоде k                   попадание в ФЭУ (задачи 1, 3)
@@ -26,8 +26,16 @@ def polar_to_cartesian(phi, cosTheta):
                      cosTheta], axis=-1)
 
 
+def photon_counter(Y: float, E: float, fluctuate: bool):
+    """Узел числа фотонов: ровно Y E (задачи 1-3) или Poisson(Y E) (задача 5)."""
+    if fluctuate:
+        return pm.Poisson('n_gamma', mu=Y * E)
+    return pm.Deterministic('n_gamma', pt.constant(int(round(Y * E))))
+
+
 def photon_model(det: Detector, Y: float, E: float, origin=(0, 0, 0),
-                 attenuation: bool = False, n_max: int = None) -> pm.Model:
+                 attenuation: bool = False, n_max: int = None,
+                 fluctuate: bool = True) -> pm.Model:
     """Пофотонная модель: каждый фотон -- отдельный элемент массива в графе.
 
     Размер массивов в графе должен быть фиксирован, а число фотонов случайно.
@@ -42,7 +50,7 @@ def photon_model(det: Detector, Y: float, E: float, origin=(0, 0, 0),
     pmt_dirs = pt.constant(det.pmt_directions)
 
     with pm.Model() as model:
-        n_gamma = pm.Poisson('n_gamma', mu=mean)
+        n_gamma = photon_counter(Y, E, fluctuate)
         phi = pm.Uniform('phi', 0, 2 * np.pi, shape=n_max)
         cosTheta = pm.Uniform('cosTheta', -1, 1, shape=n_max)
         n = polar_to_cartesian(phi, cosTheta)                        # (n_max, 3)
@@ -69,7 +77,7 @@ def photon_model(det: Detector, Y: float, E: float, origin=(0, 0, 0),
 
 
 def multinomial_model(det: Detector, Y: float, E: float, origin=(0, 0, 0),
-                      attenuation: bool = False) -> pm.Model:
+                      attenuation: bool = False, fluctuate: bool = True) -> pm.Model:
     """Компактная модель: распределение фотонов по ФЭУ одним мультиномиальным узлом.
 
     Каждый фотон независимо попадает на катод k с вероятностью p_k (телесный
@@ -90,7 +98,7 @@ def multinomial_model(det: Detector, Y: float, E: float, origin=(0, 0, 0),
 
     with pm.Model() as model:
         p = pm.Deterministic('p', frac)
-        n_gamma = pm.Poisson('n_gamma', mu=Y * E)
+        n_gamma = photon_counter(Y, E, fluctuate)
         hits_all = pm.Multinomial('hits_all', n=n_gamma,
                                   p=pt.concatenate([p, [1 - pt.sum(p)]]))
         hits = pm.Deterministic('hits', hits_all[:det.N])
@@ -99,8 +107,11 @@ def multinomial_model(det: Detector, Y: float, E: float, origin=(0, 0, 0),
     return model
 
 
-def sample_Q(model: pm.Model, draws: int, seed=None) -> np.ndarray:
-    """Прямое (предковое) сэмплирование графа: draws независимых событий."""
+def sample_Q(model: pm.Model, draws: int, seed=None) -> dict:
+    """Прямое (предковое) сэмплирование графа: draws независимых событий.
+
+    Возвращает словарь массивов 'Q', 'hits', 'n_gamma' с первой осью по событиям.
+    """
     with model:
         idata = pm.sample_prior_predictive(draws, var_names=['Q', 'hits', 'n_gamma'],
                                            random_seed=seed)
